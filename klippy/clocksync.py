@@ -156,7 +156,8 @@ class SecondarySync(ClockSync):
         self.running = False
         self.lock = threading.Lock()
     def start_thread(self):
-        """Start a dedicated thread for clock synchronization."""
+        if not self.serial:
+            raise RuntimeError("SecondarySync: `connect` must be called before starting the thread.")
         self.running = True
         self.thread = threading.Thread(target=self._run_sync_loop, daemon=True)
         self.thread.start()

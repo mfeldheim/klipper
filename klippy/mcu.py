@@ -1011,18 +1011,17 @@ class MCU:
         last_stats = {k:(float(v) if '.' in v else int(v)) for k, v in parts}
         self._get_status_info['last_stats'] = last_stats
         return False, '%s: %s' % (self._name, stats)
-
 def add_printer_objects(config):
     printer = config.get_printer()
     reactor = printer.get_reactor()
     mainsync = clocksync.ClockSync(reactor)
     printer.add_object('mcu', MCU(config.getsection('mcu'), mainsync))
-    def init_secondary_mcu(config_section):
-        # Initialize a SecondarySync object in its own thread
+    def init_secondary_mcu(secondary_mcu_section):
         secondary_sync = clocksync.SecondarySync(reactor, mainsync)
-        printer.add_object(config_section.section, MCU(config_section, secondary_sync))
-        secondary_sync.start_thread()  # Start clock sync in a thread
-
+        serial = secondary_mcu_section.get('serial')
+        secondary_sync.connect(serial)
+        printer.add_object(secondary_mcu_section.section, MCU(secondary_mcu_section, secondary_sync))
+        secondary_sync.start_thread()
     threads = []
     for section in config.get_prefix_sections('mcu '):
         thread = Thread(target=init_secondary_mcu, args=(section,))
@@ -1032,8 +1031,6 @@ def add_printer_objects(config):
     # Wait for all threads to complete initialization
     for thread in threads:
         thread.join()
-
-
 def get_printer_mcu(printer, name):
     if name == 'mcu':
         return printer.lookup_object(name)
