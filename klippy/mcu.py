@@ -4,8 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
-from threading import Thread
-
 import serialhdl, msgproto, pins, chelper, clocksync
 
 class error(Exception):
@@ -840,7 +838,7 @@ class MCU:
         if freq_diff > mcu_freq*0.01 and mcu_freq_mhz != calc_freq_mhz:
             pconfig = self._printer.lookup_object('configfile')
             msg = ("MCU '%s' configured for %dMhz but running at %dMhz!"
-                    % (self._name, mcu_freq_mhz, calc_freq_mhz))
+                   % (self._name, mcu_freq_mhz, calc_freq_mhz))
             pconfig.runtime_warning(msg)
     # Config creation helpers
     def setup_pin(self, pin_type, pin_params):
@@ -909,7 +907,7 @@ class MCU:
         self._steppersync = None
     def _shutdown(self, force=False):
         if (self._emergency_stop_cmd is None
-            or (self._is_shutdown and not force)):
+                or (self._is_shutdown and not force)):
             return
         self._emergency_stop_cmd.send()
     def _restart_arduino(self):
@@ -922,7 +920,7 @@ class MCU:
         serialhdl.cheetah_reset(self._serialport, self._reactor)
     def _restart_via_command(self):
         if ((self._reset_cmd is None and self._config_reset_cmd is None)
-            or not self._clocksync.is_active()):
+                or not self._clocksync.is_active()):
             logging.info("Unable to issue reset command on MCU '%s'",
                          self._name)
             return
@@ -986,7 +984,7 @@ class MCU:
         offset, freq = self._clocksync.calibrate_clock(print_time, eventtime)
         self._ffi_lib.steppersync_set_time(self._steppersync, offset, freq)
         if (self._clocksync.is_active() or self.is_fileoutput()
-            or self._is_timeout):
+                or self._is_timeout):
             return
         self._is_timeout = True
         logging.info("Timeout with MCU '%s' (eventtime=%f)",
@@ -1011,26 +1009,16 @@ class MCU:
         last_stats = {k:(float(v) if '.' in v else int(v)) for k, v in parts}
         self._get_status_info['last_stats'] = last_stats
         return False, '%s: %s' % (self._name, stats)
+
 def add_printer_objects(config):
     printer = config.get_printer()
     reactor = printer.get_reactor()
     mainsync = clocksync.ClockSync(reactor)
     printer.add_object('mcu', MCU(config.getsection('mcu'), mainsync))
-    def init_secondary_mcu(secondary_mcu_section):
-        secondary_sync = clocksync.SecondarySync(reactor, mainsync)
-        serial = secondary_mcu_section.get('serial')
-        secondary_sync.connect(serial)
-        printer.add_object(secondary_mcu_section.section, MCU(secondary_mcu_section, secondary_sync))
-        secondary_sync.start_thread()
-    threads = []
-    for section in config.get_prefix_sections('mcu '):
-        thread = Thread(target=init_secondary_mcu, args=(section,))
-        thread.start()
-        threads.append(thread)
+    for s in config.get_prefix_sections('mcu '):
+        printer.add_object(s.section, MCU(
+            s, clocksync.SecondarySync(reactor, mainsync)))
 
-    # Wait for all threads to complete initialization
-    for thread in threads:
-        thread.join()
 def get_printer_mcu(printer, name):
     if name == 'mcu':
         return printer.lookup_object(name)

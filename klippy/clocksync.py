@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2018  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, threading
+import logging, math
 
 RTT_AGE = .000010 / (60. * 60.)
 DECAY = 1. / 30.
@@ -27,7 +27,6 @@ class ClockSync:
         self.clock_avg = self.clock_covariance = 0.
         self.prediction_variance = 0.
         self.last_prediction_time = 0.
-        self.lock = threading.Lock()
     def connect(self, serial):
         self.serial = serial
         self.mcu_freq = serial.msgparser.get_constant_float('CLOCK_FREQ')
@@ -60,49 +59,65 @@ class ClockSync:
     def _get_clock_event(self, eventtime):
         self.serial.raw_send(self.get_clock_cmd, 0, 0, self.cmd_queue)
         self.queries_pending += 1
+        # Use an unusual time for the next event so clock messages
+        # don't resonate with other periodic events.
         next_eventtime = eventtime + .9839
         self.reactor.update_timer(self.get_clock_timer, next_eventtime)
         return next_eventtime
     def _handle_clock(self, params):
-        with self.lock:
-            self.queries_pending = max(0, self.queries_pending - 1)
-            last_clock = self.last_clock
-            clock_delta = (params['clock'] - last_clock) & 0xffffffff
-            self.last_clock = clock = last_clock + clock_delta
-            sent_time = params['#sent_time']
-            if not sent_time:
+        self.queries_pending = max(0, self.queries_pending - 1)
+        # Extend clock to 64bit
+        last_clock = self.last_clock
+        clock_delta = (params['clock'] - last_clock) & 0xffffffff
+        self.last_clock = clock = last_clock + clock_delta
+        # Check if this is the best round-trip-time seen so far
+        sent_time = params['#sent_time']
+        if not sent_time:
+            return
+        receive_time = params['#receive_time']
+        half_rtt = .5 * (receive_time - sent_time)
+        aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
+        if half_rtt < self.min_half_rtt + aged_rtt:
+            self.min_half_rtt = half_rtt
+            self.min_rtt_time = sent_time
+            logging.debug("new minimum rtt %.3f: hrtt=%.6f freq=%d",
+                          sent_time, half_rtt, self.clock_est[2])
+        # Filter out samples that are extreme outliers
+        exp_clock = ((sent_time - self.time_avg) * self.clock_est[2] + self.clock_avg)
+        clock_diff2 = (clock - exp_clock) ** 2
+        if (clock_diff2 > 25. * self.prediction_variance and
+                clock_diff2 > (.000500 * self.mcu_freq) ** 2):
+            if clock > exp_clock and sent_time < self.last_prediction_time + 10.:
+                logging.debug("Ignoring clock sample %.3f:"
+                              " freq=%d diff=%d stddev=%.3f",
+                              sent_time, self.clock_est[2], clock - exp_clock,
+                              math.sqrt(self.prediction_variance))
                 return
-            receive_time = params['#receive_time']
-            half_rtt = .5 * (receive_time - sent_time)
-            aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
-            if half_rtt < self.min_half_rtt + aged_rtt:
-                self.min_half_rtt = half_rtt
-                self.min_rtt_time = sent_time
-            exp_clock = ((sent_time - self.time_avg) * self.clock_est[2] + self.clock_avg)
-            clock_diff2 = (clock - exp_clock) ** 2
-            if (clock_diff2 > 25. * self.prediction_variance and
-                    clock_diff2 > (.000500 * self.mcu_freq) ** 2):
-                if clock > exp_clock and sent_time < self.last_prediction_time + 10.:
-                    return
-                self.prediction_variance = (.001 * self.mcu_freq) ** 2
-            else:
-                self.last_prediction_time = sent_time
-                self.prediction_variance = (
-                        (1. - DECAY) * (self.prediction_variance + clock_diff2 * DECAY))
-            diff_sent_time = sent_time - self.time_avg
-            self.time_avg += DECAY * diff_sent_time
-            self.time_variance = (1. - DECAY) * (
-                    self.time_variance + diff_sent_time ** 2 * DECAY)
-            diff_clock = clock - self.clock_avg
-            self.clock_avg += DECAY * diff_clock
-            self.clock_covariance = (1. - DECAY) * (
-                    self.clock_covariance + diff_sent_time * diff_clock * DECAY)
-            new_freq = self.clock_covariance / self.time_variance
-            pred_stddev = math.sqrt(self.prediction_variance)
-            self.serial.set_clock_est(new_freq, self.time_avg + TRANSMIT_EXTRA,
-                                      int(self.clock_avg - 3. * pred_stddev), clock)
-            self.clock_est = (self.time_avg + self.min_half_rtt,
-                              self.clock_avg, new_freq)
+            logging.info("Resetting prediction variance %.3f:"
+                         " freq=%d diff=%d stddev=%.3f",
+                         sent_time, self.clock_est[2], clock - exp_clock,
+                         math.sqrt(self.prediction_variance))
+            self.prediction_variance = (.001 * self.mcu_freq) ** 2
+        else:
+            self.last_prediction_time = sent_time
+            self.prediction_variance = (
+                    (1. - DECAY) * (self.prediction_variance + clock_diff2 * DECAY))
+        # Add clock and sent_time to linear regression
+        diff_sent_time = sent_time - self.time_avg
+        self.time_avg += DECAY * diff_sent_time
+        self.time_variance = (1. - DECAY) * (
+                self.time_variance + diff_sent_time ** 2 * DECAY)
+        diff_clock = clock - self.clock_avg
+        self.clock_avg += DECAY * diff_clock
+        self.clock_covariance = (1. - DECAY) * (
+                self.clock_covariance + diff_sent_time * diff_clock * DECAY)
+        # Update prediction from linear regression
+        new_freq = self.clock_covariance / self.time_variance
+        pred_stddev = math.sqrt(self.prediction_variance)
+        self.serial.set_clock_est(new_freq, self.time_avg + TRANSMIT_EXTRA,
+                                  int(self.clock_avg - 3. * pred_stddev), clock)
+        self.clock_est = (self.time_avg + self.min_half_rtt,
+                          self.clock_avg, new_freq)
         #logging.debug("regr %.3f: freq=%.3f d=%d(%.3f)",
         #              sent_time, new_freq, clock - exp_clock, pred_stddev)
     # clock frequency conversions
@@ -152,27 +167,6 @@ class SecondarySync(ClockSync):
         self.main_sync = main_sync
         self.clock_adj = (0., 1.)
         self.last_sync_time = 0.
-        self.thread = None
-        self.running = False
-        self.lock = threading.Lock()
-    def start_thread(self):
-        if not self.serial:
-            raise RuntimeError("SecondarySync: `connect` must be called before starting the thread.")
-        self.running = True
-        self.thread = threading.Thread(target=self._run_sync_loop, daemon=True)
-        self.thread.start()
-    def stop_thread(self):
-        """Stop the synchronization thread."""
-        self.running = False
-        if self.thread:
-            self.thread.join()
-    def _run_sync_loop(self):
-        """Synchronization loop running in a separate thread."""
-        while self.running:
-            with self.lock:
-                # Perform clock synchronization logic here
-                self.reactor.update_timer(self.get_clock_timer, self.reactor.NOW)
-            self.reactor.pause(0.1)  # Pause briefly to avoid excessive CPU usage
     def connect(self, serial):
         ClockSync.connect(self, serial)
         self.clock_adj = (0., self.mcu_freq)
@@ -199,33 +193,28 @@ class SecondarySync(ClockSync):
         adjusted_offset, adjusted_freq = self.clock_adj
         return "%s adj=%d" % (ClockSync.stats(self, eventtime), adjusted_freq)
     def calibrate_clock(self, print_time, eventtime):
-        with self.lock:
-            ser_time, ser_clock, ser_freq = self.main_sync.clock_est
-            main_mcu_freq = self.main_sync.mcu_freq
-
-            # Estimate the current print time of the main MCU
-            est_main_clock = (eventtime - ser_time) * ser_freq + ser_clock
-            est_print_time = est_main_clock / main_mcu_freq
-
-            # Determine sync1_print_time and sync2_print_time
-            sync1_print_time = max(print_time, est_print_time)
-            sync2_print_time = max(
-                sync1_print_time + 4.,
-                self.last_sync_time,
-                print_time + 2.5 * (print_time - est_print_time)
-            )
-
-            # Calculate sync2_sys_time directly from the main sync
-            sync2_main_clock = sync2_print_time * main_mcu_freq
-            sync2_sys_time = ser_time + (sync2_main_clock - ser_clock) / ser_freq
-
-            # Adjust the frequency and offset for the local clock
-            sync1_clock = self.print_time_to_clock(sync1_print_time)
-            sync2_clock = self.get_clock(sync2_sys_time)
-            adjusted_freq = (sync2_clock - sync1_clock) / (sync2_print_time - sync1_print_time)
-            adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
-
-            # Apply new adjustments
-            self.clock_adj = (adjusted_offset, adjusted_freq)
-            self.last_sync_time = sync2_print_time
-            return self.clock_adj
+        # Calculate: est_print_time = main_sync.estimatated_print_time()
+        ser_time, ser_clock, ser_freq = self.main_sync.clock_est
+        main_mcu_freq = self.main_sync.mcu_freq
+        # Estimate the current print time of the main MCU
+        est_main_clock = (eventtime - ser_time) * ser_freq + ser_clock
+        est_print_time = est_main_clock / main_mcu_freq
+        # Determine sync1_print_time and sync2_print_time
+        sync1_print_time = max(print_time, est_print_time)
+        sync2_print_time = max(
+            sync1_print_time + 4.,
+            self.last_sync_time,
+            print_time + 2.5 * (print_time - est_print_time)
+        )
+        # Calculate sync2_sys_time directly from the main sync
+        sync2_main_clock = sync2_print_time * main_mcu_freq
+        sync2_sys_time = ser_time + (sync2_main_clock - ser_clock) / ser_freq
+        # Adjust the frequency and offset for the local clock
+        sync1_clock = self.print_time_to_clock(sync1_print_time)
+        sync2_clock = self.get_clock(sync2_sys_time)
+        adjusted_freq = (sync2_clock - sync1_clock) / (sync2_print_time - sync1_print_time)
+        adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
+        # Apply new adjustments
+        self.clock_adj = (adjusted_offset, adjusted_freq)
+        self.last_sync_time = sync2_print_time
+        return self.clock_adj
