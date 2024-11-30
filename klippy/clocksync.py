@@ -152,7 +152,26 @@ class SecondarySync(ClockSync):
         self.main_sync = main_sync
         self.clock_adj = (0., 1.)
         self.last_sync_time = 0.
+        self.thread = None
+        self.running = False
         self.lock = threading.Lock()
+    def start_thread(self):
+        """Start a dedicated thread for clock synchronization."""
+        self.running = True
+        self.thread = threading.Thread(target=self._run_sync_loop, daemon=True)
+        self.thread.start()
+    def stop_thread(self):
+        """Stop the synchronization thread."""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+    def _run_sync_loop(self):
+        """Synchronization loop running in a separate thread."""
+        while self.running:
+            with self.lock:
+                # Perform clock synchronization logic here
+                self.reactor.update_timer(self.get_clock_timer, self.reactor.NOW)
+            self.reactor.pause(0.1)  # Pause briefly to avoid excessive CPU usage
     def connect(self, serial):
         ClockSync.connect(self, serial)
         self.clock_adj = (0., self.mcu_freq)

@@ -4,8 +4,9 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
+from threading import Thread
+
 import serialhdl, msgproto, pins, chelper, clocksync
-from concurrent.futures import ThreadPoolExecutor
 
 class error(Exception):
     pass
@@ -1016,17 +1017,22 @@ def add_printer_objects(config):
     reactor = printer.get_reactor()
     mainsync = clocksync.ClockSync(reactor)
     printer.add_object('mcu', MCU(config.getsection('mcu'), mainsync))
+    def init_secondary_mcu(config_section):
+        # Initialize a SecondarySync object in its own thread
+        secondary_sync = clocksync.SecondarySync(reactor, mainsync)
+        printer.add_object(config_section.section, MCU(config_section, secondary_sync))
+        secondary_sync.start_thread()  # Start clock sync in a thread
 
-    # Use ThreadPoolExecutor for secondary MCU objects
-    with ThreadPoolExecutor() as executor:
-        futures = []
-        for s in config.get_prefix_sections('mcu '):
-            futures.append(
-                executor.submit(printer.add_object, s.section, MCU(s, clocksync.SecondarySync(reactor, mainsync)))
-            )
-        # Wait for all threads to complete
-        for future in futures:
-            future.result()  # Ensure any exceptions in threads are raised
+    threads = []
+    for section in config.get_prefix_sections('mcu '):
+        thread = Thread(target=init_secondary_mcu, args=(section,))
+        thread.start()
+        threads.append(thread)
+
+    # Wait for all threads to complete initialization
+    for thread in threads:
+        thread.join()
+
 
 def get_printer_mcu(printer, name):
     if name == 'mcu':
