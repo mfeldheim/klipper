@@ -1,5 +1,5 @@
-import asyncio
 import math
+import threading
 
 RTT_AGE = 0.000010 / (60.0 * 60.0)
 DECAY = 1.0 / 30.0
@@ -9,7 +9,7 @@ TRANSMIT_EXTRA = 0.001
 class ClockSync:
     def __init__(self, serial, max_concurrent_queries=4):
         self.serial = serial
-        self.semaphore = asyncio.Semaphore(max_concurrent_queries)
+        self.semaphore = threading.Semaphore(max_concurrent_queries)
         self.mcu_freq = 1.0
         self.last_clock = 0
         self.clock_est = (0.0, 0.0, 0.0)
@@ -20,9 +20,9 @@ class ClockSync:
         self.prediction_variance = 0.0
         self.last_prediction_time = 0.0
 
-    async def connect(self):
-        self.mcu_freq = await self.serial.async_get_constant_float("CLOCK_FREQ")
-        params = await self.serial.async_send_with_response("get_uptime", "uptime")
+    def connect(self):
+        self.mcu_freq = self.serial.get_constant_float("CLOCK_FREQ")
+        params = self.serial.send_with_response("get_uptime", "uptime")
         self.last_clock = (params["high"] << 32) | params["clock"]
         self.clock_avg = self.last_clock
         self.time_avg = params["#sent_time"]
@@ -31,18 +31,13 @@ class ClockSync:
 
         # Perform initial clock synchronization
         for _ in range(8):
-            await asyncio.sleep(0.050)
-            params = await self.serial.async_send_with_response("get_clock", "clock")
+            params = self.serial.send_with_response("get_clock", "clock")
             self._handle_clock(params)
 
-    async def sync_clock(self):
-        async def query_clock():
-            async with self.semaphore:
-                params = await self.serial.async_send_with_response("get_clock", "clock")
-                self._handle_clock(params)
-
-        tasks = [query_clock() for _ in range(4)]
-        await asyncio.gather(*tasks)
+    def sync_clock(self):
+        with self.semaphore:
+            params = self.serial.send_with_response("get_clock", "clock")
+            self._handle_clock(params)
 
     def _handle_clock(self, params):
         last_clock = self.last_clock
@@ -77,7 +72,7 @@ class ClockSync:
         diff_sent_time = sent_time - self.time_avg
         self.time_avg += DECAY * diff_sent_time
         self.time_variance = (1.0 - DECAY) * (
-                self.time_variance + diff_sent_time ** 2 * DECAY
+                self.time_variance + diff_sent_time**2 * DECAY
         )
         diff_clock = clock - self.clock_avg
         self.clock_avg += DECAY * diff_clock
@@ -91,7 +86,7 @@ class ClockSync:
             self.time_avg + TRANSMIT_EXTRA,
             int(self.clock_avg - 3.0 * math.sqrt(self.prediction_variance)),
             clock,
-        )
+            )
         self.clock_est = (
             self.time_avg + self.min_half_rtt,
             self.clock_avg,
@@ -115,33 +110,11 @@ class ClockSync:
     def dump_debug(self):
         sample_time, clock, freq = self.clock_est
         return (
-                "clocksync state: mcu_freq=%d last_clock=%d"
-                " clock_est=(%.3f %d %.3f) min_half_rtt=%.6f min_rtt_time=%.3f"
-                " time_avg=%.3f(%.3f) clock_avg=%.3f(%.3f)"
-                " pred_variance=%.3f"
-                % (
-                    self.mcu_freq,
-                    self.last_clock,
-                    sample_time,
-                    clock,
-                    freq,
-                    self.min_half_rtt,
-                    self.min_rtt_time,
-                    self.time_avg,
-                    self.time_variance,
-                    self.clock_avg,
-                    self.clock_covariance,
-                    self.prediction_variance,
-                )
-        )
-
-    def estimated_print_time(self, eventtime):
-        """
-        Estimate the print time for a given system time.
-        """
-        sample_time, clock, freq = self.clock_est
-        return self.clock_to_print_time(
-            clock + (eventtime - sample_time) * freq
+            f"clocksync state: mcu_freq={self.mcu_freq} last_clock={self.last_clock} "
+            f"clock_est=({sample_time:.3f} {clock} {freq:.3f}) min_half_rtt={self.min_half_rtt:.6f} "
+            f"min_rtt_time={self.min_rtt_time:.3f} time_avg={self.time_avg:.3f} "
+            f"time_variance={self.time_variance:.3f} clock_avg={self.clock_avg:.3f} "
+            f"clock_covariance={self.clock_covariance:.3f} pred_variance={self.prediction_variance:.3f}"
         )
 
 
@@ -152,36 +125,31 @@ class SecondarySync(ClockSync):
         self.clock_adj = (0.0, 1.0)
         self.last_sync_time = 0.0
 
-    async def connect(self):
-        await super().connect()
+    def connect(self):
+        super().connect()
         self.clock_adj = (0.0, self.mcu_freq)
-        await self._calibrate_to_main_sync()
+        self._calibrate_to_main_sync()
 
-    async def _calibrate_to_main_sync(self):
-        """Calibrate this MCU's clock against the main MCU."""
-        curtime = asyncio.get_event_loop().time()
+    def _calibrate_to_main_sync(self):
+        curtime = self.serial.reactor.monotonic()
         main_print_time = self.main_sync.estimated_print_time(curtime)
         local_print_time = self.estimated_print_time(curtime)
         self.clock_adj = (main_print_time - local_print_time, self.mcu_freq)
 
     def print_time_to_clock(self, print_time):
-        """Convert print time to this MCU's clock, adjusted for main MCU sync."""
         adjusted_offset, adjusted_freq = self.clock_adj
         return int((print_time - adjusted_offset) * adjusted_freq)
 
     def clock_to_print_time(self, clock):
-        """Convert this MCU's clock to print time, adjusted for main MCU sync."""
         adjusted_offset, adjusted_freq = self.clock_adj
         return clock / adjusted_freq + adjusted_offset
 
     def dump_debug(self):
-        """Provide debug information for this secondary sync."""
         adjusted_offset, adjusted_freq = self.clock_adj
         return (
             f"{super().dump_debug()} clock_adj=({adjusted_offset:.3f} {adjusted_freq:.3f})"
         )
 
     def stats(self, eventtime):
-        """Generate statistics for debugging or monitoring."""
         adjusted_offset, adjusted_freq = self.clock_adj
         return f"{super().stats(eventtime)} adj_freq={adjusted_freq}"
