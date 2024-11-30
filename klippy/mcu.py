@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import sys, os, zlib, logging, math
 import serialhdl, msgproto, pins, chelper, clocksync
+from concurrent.futures import ThreadPoolExecutor
 
 class error(Exception):
     pass
@@ -1015,9 +1016,17 @@ def add_printer_objects(config):
     reactor = printer.get_reactor()
     mainsync = clocksync.ClockSync(reactor)
     printer.add_object('mcu', MCU(config.getsection('mcu'), mainsync))
-    for s in config.get_prefix_sections('mcu '):
-        printer.add_object(s.section, MCU(
-            s, clocksync.SecondarySync(reactor, mainsync)))
+
+    # Use ThreadPoolExecutor for secondary MCU objects
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        for s in config.get_prefix_sections('mcu '):
+            futures.append(
+                executor.submit(printer.add_object, s.section, MCU(s, clocksync.SecondarySync(reactor, mainsync)))
+            )
+        # Wait for all threads to complete
+        for future in futures:
+            future.result()  # Ensure any exceptions in threads are raised
 
 def get_printer_mcu(printer, name):
     if name == 'mcu':

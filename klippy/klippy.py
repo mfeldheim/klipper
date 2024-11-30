@@ -4,6 +4,7 @@
 # Copyright (C) 2016-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from threading import Lock
 import sys, os, gc, optparse, logging, time, collections, importlib
 import util, reactor, queuelogger, msgproto
 import gcode, configfile, pins, mcu, toolhead, webhooks
@@ -35,6 +36,7 @@ class Printer:
         self.run_result = None
         self.event_handlers = {}
         self.objects = collections.OrderedDict()
+        self.objects_lock = Lock()
         # Init printer components that must be setup prior to config
         for m in [gcode, webhooks]:
             m.add_early_printer_objects(self)
@@ -68,10 +70,11 @@ class Printer:
         self.state_message = newmsg
         logging.error(newmsg)
     def add_object(self, name, obj):
-        if name in self.objects:
-            raise self.config_error(
-                "Printer object '%s' already created" % (name,))
-        self.objects[name] = obj
+        with self.objects_lock:
+            if name in self.objects:
+                raise self.config_error(
+                    f"Printer object '{name}' already created")
+            self.objects[name] = obj
     def lookup_object(self, name, default=configfile.sentinel):
         if name in self.objects:
             return self.objects[name]
