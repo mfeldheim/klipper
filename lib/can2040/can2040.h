@@ -32,8 +32,15 @@ struct can2040_stats {
     uint32_t parse_error;
 };
 
+// Bit timing structure
+struct can2040_bit_timing {
+    uint32_t prescaler;
+    uint32_t tseg1, tseg2, sjw;
+};
+
 void can2040_setup(struct can2040 *cd, uint32_t pio_num);
 void can2040_callback_config(struct can2040 *cd, can2040_rx_cb rx_cb);
+void can2040_configure_bit_timing(struct can2040 *cd, struct can2040_bit_timing *timing);
 void can2040_start(struct can2040 *cd, uint32_t sys_clock, uint32_t bitrate
                    , uint32_t gpio_rx, uint32_t gpio_tx);
 void can2040_stop(struct can2040 *cd);
@@ -64,6 +71,8 @@ struct can2040 {
     uint32_t gpio_rx, gpio_tx;
     can2040_rx_cb rx_cb;
     struct can2040_stats stats;
+    struct can2040_bit_timing bit_timing;
+    uint32_t bit_timing_configured;
 
     // Bit unstuffing
     struct can2040_bitunstuffer unstuf;
@@ -80,7 +89,7 @@ struct can2040 {
     // Transmits
     uint32_t tx_state;
     uint32_t tx_pull_pos, tx_push_pos;
-    struct can2040_transmit tx_queue[4];
+    struct can2040_transmit tx_queue[8];
 };
 
 #endif // can2040.h

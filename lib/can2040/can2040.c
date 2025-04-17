@@ -770,6 +770,7 @@ tx_schedule_transmit(struct can2040 *cd)
         // Raced with can2040_transmit() - msg is now available for transmit
         pio_signal_set_txpending(cd);
     }
+
     cd->tx_state = TS_QUEUED;
     cd->stats.tx_attempt++;
     struct can2040_transmit *qt = &cd->tx_queue[tx_qpos(cd, tx_pull_pos)];
@@ -991,6 +992,7 @@ report_line_txpending(struct can2040 *cd)
         pio_irq_set(cd, SI_MAYTX | SI_ACKDONE);
         return;
     }
+
     // Tx request from can2040_transmit(), report_note_eof_success(),
     // or report_note_discarding().
     uint32_t check_txpending = tx_schedule_transmit(cd);
@@ -1353,11 +1355,26 @@ can2040_check_transmit(struct can2040 *cd)
 int
 can2040_transmit(struct can2040 *cd, struct can2040_msg *msg)
 {
+    // Try multiple times with a very short delay if queue is full
+    // This helps with low clock frequency devices
+    for (int retry = 0; retry < 2; retry++) {
+        uint32_t tx_pull_pos = readl(&cd->tx_pull_pos);
+        uint32_t tx_push_pos = cd->tx_push_pos;
+        uint32_t pending = tx_push_pos - tx_pull_pos;
+        if (pending < ARRAY_SIZE(cd->tx_queue))
+            break;
+
+        // Very brief delay - just enough to allow interrupt processing
+        asm volatile("nop");
+        asm volatile("nop");
+    }
+
+    // Check again after retries
     uint32_t tx_pull_pos = readl(&cd->tx_pull_pos);
     uint32_t tx_push_pos = cd->tx_push_pos;
     uint32_t pending = tx_push_pos - tx_pull_pos;
     if (pending >= ARRAY_SIZE(cd->tx_queue))
-        // Tx queue full
+        // Tx queue still full after retries
         return -1;
 
     // Copy msg into transmit queue
@@ -1440,6 +1457,36 @@ void
 can2040_callback_config(struct can2040 *cd, can2040_rx_cb rx_cb)
 {
     cd->rx_cb = rx_cb;
+}
+
+// API function to configure bit timing parameters
+void
+can2040_configure_bit_timing(struct can2040 *cd, struct can2040_bit_timing *timing)
+{
+    // Validate parameters
+    if (!timing || !timing->prescaler) {
+        // Invalid parameters, bit timing will be calculated automatically
+        cd->bit_timing_configured = 0;
+        return;
+    }
+
+    // Copy bit timing parameters
+    cd->bit_timing.prescaler = timing->prescaler;
+    cd->bit_timing.tseg1 = timing->tseg1;
+    cd->bit_timing.tseg2 = timing->tseg2;
+    cd->bit_timing.sjw = timing->sjw;
+
+    // Validate and adjust parameters if needed
+    if (cd->bit_timing.tseg1 < 1) cd->bit_timing.tseg1 = 1;
+    if (cd->bit_timing.tseg2 < 1) cd->bit_timing.tseg2 = 1;
+    if (cd->bit_timing.sjw < 1) cd->bit_timing.sjw = 1;
+
+    // SJW should not be larger than TSEG2
+    if (cd->bit_timing.sjw > cd->bit_timing.tseg2)
+        cd->bit_timing.sjw = cd->bit_timing.tseg2;
+
+    // Mark as configured
+    cd->bit_timing_configured = 1;
 }
 
 // API function to start CANbus interface

@@ -60,7 +60,7 @@ bootloader_request(void)
  ****************************************************************/
 
 #define FREQ_XOSC 12000000
-#define FREQ_SYS (CONFIG_MACH_RP2040 ? 200000000 : CONFIG_CLOCK_FREQ)
+#define FREQ_SYS CONFIG_CLOCK_FREQ
 #define FBDIV (FREQ_SYS == 200000000 ? 100 : 125)
 #define FREQ_USB 48000000
 
@@ -153,11 +153,26 @@ clock_setup(void)
     resets_hw->reset = ~(RESETS_RESET_IO_QSPI_BITS
                          | RESETS_RESET_PADS_QSPI_BITS);
 
-    // Setup xosc, pll_sys, and switch clk_sys
+    // Setup xosc
     xosc_setup();
     enable_pclock(RESETS_RESET_PLL_SYS_BITS);
     set_vsel();
-    pll_setup(pll_sys_hw, FBDIV, FBDIV * FREQ_XOSC / FREQ_SYS);
+
+    // Configure PLL for 64MHz operation
+    // For 64MHz: VCO = 12MHz * 32 / 1 = 384MHz, post-div = 6 (div1=3, div2=2)
+    // This gives 384MHz / 6 = 64MHz
+    pll_hw_t *pll = pll_sys_hw;
+    pll->cs = 1;  // REFDIV = 1
+    pll->fbdiv_int = 32;  // FBDIV = 32
+    pll->pwr = PLL_PWR_DSMPD_BITS | PLL_PWR_POSTDIVPD_BITS;
+    while (!(pll->cs & PLL_CS_LOCK_BITS))
+        ;
+
+    // Setup post divider for 64MHz
+    pll->prim = ((3 << PLL_PRIM_POSTDIV1_LSB) | (2 << PLL_PRIM_POSTDIV2_LSB));
+    pll->pwr = PLL_PWR_DSMPD_BITS;
+
+    // Switch system clock to PLL
     csys->ctrl = 0;
     csys->div = 1<<CLOCKS_CLK_SYS_DIV_INT_LSB;
     csys->ctrl = CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX;

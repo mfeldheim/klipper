@@ -18,6 +18,8 @@
 #include "internal.h" // DMA_IRQ_0_IRQn
 #include "sched.h" // DECL_INIT
 
+// can2040_bit_timing struct and can2040_configure_bit_timing function are now defined in can2040.h
+
 #define GPIO_STR_CAN_RX "gpio" __stringify(CONFIG_RPXXXX_CANBUS_GPIO_RX)
 #define GPIO_STR_CAN_TX "gpio" __stringify(CONFIG_RPXXXX_CANBUS_GPIO_TX)
 DECL_CONSTANT_STR("RESERVE_PINS_CAN", GPIO_STR_CAN_RX "," GPIO_STR_CAN_TX);
@@ -84,11 +86,37 @@ can_init(void)
     can2040_setup(&cbus, 0);
     can2040_callback_config(&cbus, can2040_cb);
 
+    // Configure bit timing parameters to match Linux CAN device
+    uint32_t pclk = get_pclock_frequency(RESETS_RESET_PIO0_RESET);
+
+    // Use exact parameters from Linux CAN device:
+    // prop-seg = 5, phase-seg1 = 6, phase-seg2 = 4, sjw = 2, brp = 4
+    // This gives a sample point of 75% (11/15)
+
+    // Set prescaler (brp) to 4
+    uint32_t prescaler = 4;
+
+    // Set tseg1 to prop-seg + phase-seg1 = 5 + 6 = 11
+    uint32_t tseg1 = 11;
+
+    // Set tseg2 to phase-seg2 = 4
+    uint32_t tseg2 = 4;
+
+    // Set sjw to 2
+    uint32_t sjw = 2;
+
+    // Apply bit timing configuration using the API function
+    struct can2040_bit_timing timing;
+    timing.prescaler = prescaler;
+    timing.tseg1 = tseg1;
+    timing.tseg2 = tseg2;
+    timing.sjw = sjw;
+    can2040_configure_bit_timing(&cbus, &timing);
+
     // Enable irqs
     armcm_enable_irq(PIOx_IRQHandler, PIO0_IRQ_0_IRQn, 1);
 
     // Start canbus
-    uint32_t pclk = get_pclock_frequency(RESETS_RESET_PIO0_RESET);
     can2040_start(&cbus, pclk, CONFIG_CANBUS_FREQUENCY
                   , CONFIG_RPXXXX_CANBUS_GPIO_RX, CONFIG_RPXXXX_CANBUS_GPIO_TX);
 }
