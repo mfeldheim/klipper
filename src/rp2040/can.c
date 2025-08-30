@@ -33,6 +33,15 @@ static struct {
     uint8_t overflow;
 } CAN_RxBuffer;
 
+// Software filtering state
+static struct {
+    uint32_t node_id;
+    uint32_t admin_id;
+    uint32_t rx_id;
+    uint32_t tx_id;
+    uint8_t filter_enabled;
+} CAN_Filter;
+
 // Task to process buffered CAN messages
 void
 can_rx_task(void)
