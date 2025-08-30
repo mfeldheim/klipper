@@ -14,6 +14,7 @@
 #include "generic/canbus.h" // canbus_notify_tx
 #include "generic/canserial.h" // CANBUS_ID_ADMIN
 #include "internal.h" // enable_pclock
+#include "sched.h" // sched_wake_tasks
 #include "sched.h" // DECL_INIT
 
 #if CONFIG_STM32_CANBUS_PA11_PA12 || CONFIG_STM32_CANBUS_PA11_PA12_REMAP
@@ -172,17 +173,52 @@ static struct {
     uint32_t rx_error, tx_error;
 } CAN_Errors;
 
+// Message buffer for deferred processing
+#define CAN_RX_BUFFER_SIZE 8
+static struct {
+    struct canbus_msg buffer[CAN_RX_BUFFER_SIZE];
+    uint32_t head, tail;
+    uint8_t overflow;
+} CAN_RxBuffer;
+
+// Task to process buffered CAN messages
+void
+can_rx_task(void)
+{
+    for (;;) {
+        // Check if there are messages to process
+        irqstatus_t flag = irq_save();
+        uint32_t head = CAN_RxBuffer.head;
+        uint32_t tail = CAN_RxBuffer.tail;
+        if (head == tail) {
+            irq_restore(flag);
+            break;
+        }
+
+        // Get next message
+        struct canbus_msg msg = CAN_RxBuffer.buffer[tail];
+        CAN_RxBuffer.tail = (tail + 1) % CAN_RX_BUFFER_SIZE;
+        irq_restore(flag);
+
+        // Process the message outside of IRQ context
+        canbus_process_data(&msg);
+    }
+}
+DECL_TASK(can_rx_task);
+
 // Report interface status
 void
 canhw_get_status(struct canbus_status *status)
 {
     irqstatus_t flag = irq_save();
     uint32_t esr = SOC_CAN->ESR;
-    uint32_t rx_error = CAN_Errors.rx_error, tx_error = CAN_Errors.tx_error;
+    uint32_t rx_error = CAN_Errors.rx_error + CAN_RxBuffer.overflow;
+    uint32_t tx_error = CAN_Errors.tx_error;
     irq_restore(flag);
 
     status->rx_error = rx_error;
     status->tx_error = tx_error;
+    status->tx_retries = 0;
     if (esr & CAN_ESR_BOFF)
         status->bus_state = CANBUS_STATE_OFF;
     else if (esr & CAN_ESR_EPVF)
@@ -190,7 +226,7 @@ canhw_get_status(struct canbus_status *status)
     else if (esr & CAN_ESR_EWGF)
         status->bus_state = CANBUS_STATE_WARN;
     else
-        status->bus_state = 0;
+        status->bus_state = CANBUS_STATE_ACTIVE;
 }
 
 // This function handles CAN global interrupts
@@ -212,8 +248,17 @@ CAN_IRQHandler(void)
         msg.data32[1] = mb->RDHR;
         SOC_CAN->RF0R = CAN_RF0R_RFOM0;
 
-        // Process packet
-        canbus_process_data(&msg);
+        // Buffer packet for deferred processing
+        uint32_t head = CAN_RxBuffer.head;
+        uint32_t next_head = (head + 1) % CAN_RX_BUFFER_SIZE;
+        if (next_head != CAN_RxBuffer.tail) {
+            CAN_RxBuffer.buffer[head] = msg;
+            CAN_RxBuffer.head = next_head;
+            sched_wake_tasks();
+        } else {
+            // Buffer overflow - increment error counter
+            CAN_RxBuffer.overflow++;
+        }
     }
 
     // Check for transmit ready
@@ -268,25 +313,45 @@ compute_btr(uint32_t pclock, uint32_t bitrate)
         Bit value sample point is after Tq+Tbs1. Ideal sample point
         is at 87.5% of NominalBitTime
 
-        Use the lowest brp where ts1 and ts2 are in valid range
+        Improved algorithm to find optimal timing parameters with
+        better error tolerance and timing margins.
      */
 
     uint32_t bit_clocks = pclock / bitrate; // clock ticks per bit
+    uint32_t best_error = 0xFFFFFFFF;
+    uint32_t best_btr = 0;
 
-    uint32_t sjw = 2;
-    uint32_t qs;
-    // Find number of time quantas that gives us the exact wanted bit time
-    for (qs = 18; qs > 9; qs--) {
-        // check that bit_clocks / quantas is an integer
-        uint32_t brp_rem = bit_clocks % qs;
-        if (brp_rem == 0)
-            break;
+    // Try different prescaler values to find the best timing
+    for (uint32_t brp = 1; brp <= 1024; brp++) {
+        uint32_t tq_per_bit = bit_clocks / brp;
+        if (tq_per_bit < 8 || tq_per_bit > 25)
+            continue;
+
+        // Calculate timing segments for ~87.5% sample point
+        uint32_t time_seg2 = tq_per_bit / 8;
+        if (time_seg2 < 1) time_seg2 = 1;
+        if (time_seg2 > 8) time_seg2 = 8;
+
+        uint32_t time_seg1 = tq_per_bit - 1 - time_seg2;
+        if (time_seg1 < 1 || time_seg1 > 16)
+            continue;
+
+        // Calculate actual bitrate and error
+        uint32_t actual_bit_clocks = brp * (1 + time_seg1 + time_seg2);
+        uint32_t error = (actual_bit_clocks > bit_clocks) ?
+                        (actual_bit_clocks - bit_clocks) :
+                        (bit_clocks - actual_bit_clocks);
+
+        if (error < best_error) {
+            best_error = error;
+            uint32_t sjw = (time_seg2 > 4) ? 4 : time_seg2;
+            best_btr = make_btr(sjw, time_seg1, time_seg2, brp);
+            if (error == 0)
+                break; // Perfect match found
+        }
     }
-    uint32_t brp       = bit_clocks / qs;
-    uint32_t time_seg2 = qs / 8; // sample at ~87.5%
-    uint32_t time_seg1 = qs - (1 + time_seg2);
 
-    return make_btr(sjw, time_seg1, time_seg2, brp);
+    return best_btr;
 }
 
 void
