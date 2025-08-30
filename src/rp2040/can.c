@@ -9,6 +9,7 @@
 #include "autoconf.h" // CONFIG_CANBUS_FREQUENCY
 #include "board/armcm_boot.h" // armcm_enable_irq
 #include "board/io.h" // readl
+#include "board/irq.h" // irq_save
 #include "can2040.h" // can2040_setup
 #include "command.h" // DECL_CONSTANT_STR
 #include "fasthash.h" // fasthash64
@@ -23,6 +24,39 @@
 DECL_CONSTANT_STR("RESERVE_PINS_CAN", GPIO_STR_CAN_RX "," GPIO_STR_CAN_TX);
 
 static struct can2040 cbus;
+
+// Message buffer for deferred processing
+#define CAN_RX_BUFFER_SIZE 16
+static struct {
+    struct can2040_msg buffer[CAN_RX_BUFFER_SIZE];
+    uint32_t head, tail;
+    uint8_t overflow;
+} CAN_RxBuffer;
+
+// Task to process buffered CAN messages
+void
+can_rx_task(void)
+{
+    for (;;) {
+        // Check if there are messages to process
+        irqstatus_t flag = irq_save();
+        uint32_t head = CAN_RxBuffer.head;
+        uint32_t tail = CAN_RxBuffer.tail;
+        if (head == tail) {
+            irq_restore(flag);
+            break;
+        }
+
+        // Get next message
+        struct can2040_msg msg = CAN_RxBuffer.buffer[tail];
+        CAN_RxBuffer.tail = (tail + 1) % CAN_RX_BUFFER_SIZE;
+        irq_restore(flag);
+
+        // Process the message outside of IRQ context
+        canbus_process_data((void*)&msg);
+    }
+}
+DECL_TASK(can_rx_task);
 
 // Transmit a packet
 int
@@ -53,7 +87,7 @@ canhw_get_status(struct canbus_status *status)
     if (last_tx_retries != tx_extra)
         last_tx_retries = tx_extra - 1;
 
-    status->rx_error = stats.parse_error;
+    status->rx_error = stats.parse_error + CAN_RxBuffer.overflow;
     status->tx_retries = last_tx_retries;
     status->bus_state = CANBUS_STATE_ACTIVE;
 }
@@ -66,8 +100,21 @@ can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *msg)
         canbus_notify_tx();
         return;
     }
-    if (notify & CAN2040_NOTIFY_RX)
-        canbus_process_data((void*)msg);
+    if (notify & CAN2040_NOTIFY_RX) {
+        // Buffer packet for deferred processing
+        irqstatus_t flag = irq_save();
+        uint32_t head = CAN_RxBuffer.head;
+        uint32_t next_head = (head + 1) % CAN_RX_BUFFER_SIZE;
+        if (next_head != CAN_RxBuffer.tail) {
+            CAN_RxBuffer.buffer[head] = *msg;
+            CAN_RxBuffer.head = next_head;
+            sched_wake_tasks();
+        } else {
+            // Buffer overflow - increment error counter
+            CAN_RxBuffer.overflow++;
+        }
+        irq_restore(flag);
+    }
 }
 
 // Main PIO irq handler
