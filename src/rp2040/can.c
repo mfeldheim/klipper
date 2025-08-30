@@ -42,6 +42,19 @@ static struct {
     uint8_t filter_enabled;
 } CAN_Filter;
 
+// Check if message passes software filter
+static int
+can_filter_check(uint32_t id)
+{
+    if (!CAN_Filter.filter_enabled)
+        return 1; // Accept all messages when filter disabled
+
+    // Accept messages matching our node ID or admin broadcasts
+    return (id == CAN_Filter.rx_id ||
+            id == CAN_Filter.admin_id ||
+            (id & 0x7F0) == (CAN_Filter.node_id & 0x7F0));
+}
+
 // Task to process buffered CAN messages
 void
 can_rx_task(void)
@@ -61,8 +74,11 @@ can_rx_task(void)
         CAN_RxBuffer.tail = (tail + 1) % CAN_RX_BUFFER_SIZE;
         irq_restore(flag);
 
-        // Process the message outside of IRQ context
-        canbus_process_data((void*)&msg);
+        // Apply software filtering
+        if (can_filter_check(msg.id)) {
+            // Process the message outside of IRQ context
+            canbus_process_data((void*)&msg);
+        }
     }
 }
 DECL_TASK(can_rx_task);
@@ -79,9 +95,13 @@ canhw_send(struct canbus_msg *msg)
 
 // Setup the receive packet filter
 void
-canhw_set_filter(uint32_t id)
+canhw_set_filter(uint32_t node_id)
 {
-    // Filter not implemented (and not necessary)
+    CAN_Filter.node_id = node_id;
+    CAN_Filter.rx_id = node_id;
+    CAN_Filter.tx_id = node_id + 1;
+    CAN_Filter.admin_id = 0x3F0; // Admin broadcast ID
+    CAN_Filter.filter_enabled = 1;
 }
 
 static uint32_t last_tx_retries;
@@ -147,5 +167,10 @@ can_init(void)
     uint32_t pclk = get_pclock_frequency(RESETS_RESET_PIO0_RESET);
     can2040_start(&cbus, pclk, CONFIG_CANBUS_FREQUENCY
                   , CONFIG_RPXXXX_CANBUS_GPIO_RX, CONFIG_RPXXXX_CANBUS_GPIO_TX);
+
+    // Initialize filter (disabled by default)
+    CAN_Filter.filter_enabled = 0;
 }
 DECL_INIT(can_init);
+
+
