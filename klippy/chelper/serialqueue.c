@@ -39,7 +39,7 @@ struct serialqueue {
     struct pollreactor *pr;
     int serial_fd, serial_fd_type, client_id;
     int pipe_fds[2];
-    uint8_t input_buf[4096];
+    uint8_t input_buf[8192];  // Increased from 4KB to 8KB for better buffering
     uint8_t need_sync;
     int input_pos;
     // Threading
@@ -71,8 +71,8 @@ struct serialqueue {
     struct list_head fast_readers;
     // Debugging
     struct list_head old_sent, old_receive;
-    // Stats
-    uint32_t bytes_write, bytes_read, bytes_retransmit, bytes_invalid;
+    // Stats (64-bit to prevent overflow in long prints)
+    uint64_t bytes_write, bytes_read, bytes_retransmit, bytes_invalid;
 };
 
 #define SQPF_SERIAL 0
@@ -310,6 +310,14 @@ input_event(struct serialqueue *sq, double eventtime)
         }
         if (cf.can_id != sq->client_id + 1)
             return;
+        // Check for input buffer overflow
+        if (sq->input_pos + cf.can_dlc > sizeof(sq->input_buf)) {
+            errorf("CAN input buffer overflow - dropping frame");
+            pthread_mutex_lock(&sq->lock);
+            sq->bytes_invalid += cf.can_dlc;
+            pthread_mutex_unlock(&sq->lock);
+            return;
+        }
         memcpy(&sq->input_buf[sq->input_pos], cf.data, cf.can_dlc);
         sq->input_pos += cf.can_dlc;
     } else {
@@ -380,8 +388,10 @@ do_write(struct serialqueue *sq, void *buf, int buflen)
             double curtime = get_monotonic();
             if (!sq->last_write_fail_time) {
                 sq->last_write_fail_time = curtime;
-            } else if (curtime > sq->last_write_fail_time + 10.0) {
-                errorf("Halting reads due to CAN write errors.");
+            } else if (curtime > sq->last_write_fail_time + 30.0) {
+                // Increased timeout from 10s to 30s for better tolerance
+                // of temporary CAN bus congestion during long prints
+                errorf("Halting reads due to persistent CAN write errors.");
                 pollreactor_do_exit(sq->pr);
             }
             return;
