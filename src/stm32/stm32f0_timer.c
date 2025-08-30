@@ -80,6 +80,16 @@ timer_read_time(void)
 static uint_fast8_t
 timer_event(struct timer *t)
 {
+    uint32_t cur_time = timer_get();
+    uint32_t expected_time = (timer_high + 0x8000) & 0xffff;
+
+    // Check for missed timer events (indicates system overload)
+    uint32_t time_diff = (cur_time - expected_time) & 0xffff;
+    if (time_diff > 0x4000) {
+        // Missed by more than half the wrap period - system is overloaded
+        shutdown("Timer wrap event missed - system overload detected");
+    }
+
     timer_high += 0x8000;
     t->waketime = timer_high + 0x8000;
     return SF_RESCHEDULE;
