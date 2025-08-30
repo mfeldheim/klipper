@@ -59,9 +59,7 @@ digital_load_event(struct timer *timer)
     // Apply next update and remove it from queue
     struct digital_out_s *d = container_of(timer, struct digital_out_s, timer);
     if (move_queue_empty(&d->mq)) {
-        // Provide more diagnostic information
-        uint32_t cur_time = timer_read_time();
-        shutdown("Missed scheduling of next digital out event at time %u", cur_time);
+        shutdown("Missed scheduling of next digital out event");
     }
     struct move_node *mn = move_queue_pop(&d->mq);
     struct digital_move *m = container_of(mn, struct digital_move, node);
