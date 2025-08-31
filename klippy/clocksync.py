@@ -61,6 +61,9 @@ class ClockSync:
         self.queries_pending += 1
         # Use an unusual time for the next event so clock messages
         # don't resonate with other periodic events.
+        # For CAN MCUs, use slightly faster sync to compensate for network delays
+        if hasattr(self.serial, '_canbus_iface'):
+            return eventtime + .7839  # Faster sync for CAN MCUs
         return eventtime + .9839
     def _handle_clock(self, params):
         self.queries_pending = 0
@@ -75,7 +78,14 @@ class ClockSync:
         receive_time = params['#receive_time']
         half_rtt = .5 * (receive_time - sent_time)
         aged_rtt = (sent_time - self.min_rtt_time) * RTT_AGE
-        if half_rtt < self.min_half_rtt + aged_rtt:
+
+        # CAN-specific RTT filtering - be more tolerant of network delays
+        rtt_threshold = self.min_half_rtt + aged_rtt
+        if hasattr(self.serial, '_canbus_iface'):
+            # For CAN MCUs, allow slightly higher RTT variance due to network arbitration
+            rtt_threshold += 0.002  # Allow 2ms additional variance for CAN
+
+        if half_rtt < rtt_threshold:
             self.min_half_rtt = half_rtt
             self.min_rtt_time = sent_time
             logging.debug("new minimum rtt %.3f: hrtt=%.6f freq=%d",
@@ -200,8 +210,17 @@ class SecondarySync(ClockSync):
         est_print_time = est_main_clock / main_mcu_freq
         # Determine sync1_print_time and sync2_print_time
         sync1_print_time = max(print_time, est_print_time)
-        sync2_print_time = max(sync1_print_time + 4., self.last_sync_time,
-                               print_time + 2.5 * (print_time - est_print_time))
+
+        # CAN-specific timing adjustments
+        sync_margin = 4.0  # Default sync margin
+        timing_factor = 2.5  # Default timing factor
+        if hasattr(self.serial, '_canbus_iface'):
+            # For CAN MCUs, use tighter sync margins for better coordination
+            sync_margin = 3.0  # Reduced margin for CAN
+            timing_factor = 2.0  # More aggressive timing for CAN
+
+        sync2_print_time = max(sync1_print_time + sync_margin, self.last_sync_time,
+                               print_time + timing_factor * (print_time - est_print_time))
         # Calc sync2_sys_time (inverse of main_sync.estimatated_print_time)
         sync2_main_clock = sync2_print_time * main_mcu_freq
         sync2_sys_time = ser_time + (sync2_main_clock - ser_clock) / ser_freq

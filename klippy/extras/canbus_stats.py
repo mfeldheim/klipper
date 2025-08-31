@@ -62,8 +62,15 @@ class PrinterCANBusStats:
         retries = prev_retries + ((params['tx_retries'] - prev_retries)
                                   & 0xffffffff)
         state = params['canbus_bus_state']
+
+        # Enhanced CAN monitoring - track retransmission rate
+        retry_delta = retries - prev_retries
+        if retry_delta > 100:  # High retransmission rate
+            logging.warning("CAN MCU '%s' high retransmission rate: %d/sec",
+                          self.name, retry_delta)
+
         self.status = {'rx_error': rx, 'tx_error': tx, 'tx_retries': retries,
-                       'bus_state': state}
+                       'bus_state': state, 'retry_rate': retry_delta}
         return self.reactor.monotonic() + 1.
     def stats(self, eventtime):
         status = self.status

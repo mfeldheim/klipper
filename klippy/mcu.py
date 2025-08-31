@@ -979,6 +979,14 @@ class MCU:
             return
         offset, freq = self._clocksync.calibrate_clock(print_time, eventtime)
         self._ffi_lib.steppersync_set_time(self._steppersync, offset, freq)
+
+        # CAN-specific timing validation
+        if hasattr(self._serial, '_canbus_iface'):
+            # For CAN MCUs, monitor timing more closely
+            rtt = getattr(self._clocksync, 'min_half_rtt', 0) * 2
+            if rtt > 0.015:  # 15ms RTT threshold for CAN
+                logging.warning("CAN MCU '%s' high RTT: %.3fms",
+                              self._name, rtt * 1000)
         if (self._clocksync.is_active() or self.is_fileoutput()
             or self._is_timeout):
             return
