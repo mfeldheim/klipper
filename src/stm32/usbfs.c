@@ -421,6 +421,13 @@ usb_init(void)
     // Enable USB clock
     enable_pclock(USB_BASE);
 
+#if CONFIG_MACH_STM32G0
+    // For STM32G0, enable USB device immediately to activate internal pullup
+    // The STM32G0 family doesn't have USB_BCDR_DPPU register
+    // Instead, the pullup is automatically enabled when the device is enabled
+    USB->DADDR = USB_DADDR_EF;
+#endif
+
     // Setup USB packet memory
     btable_configure();
 
