@@ -41,8 +41,6 @@ canhw_set_filter(uint32_t id)
     // Filter not implemented (and not necessary)
 }
 
-static uint32_t last_tx_retries;
-
 // Report interface status
 void
 canhw_get_status(struct canbus_status *status)
@@ -50,11 +48,9 @@ canhw_get_status(struct canbus_status *status)
     struct can2040_stats stats;
     can2040_get_statistics(&cbus, &stats);
     uint32_t tx_extra = stats.tx_attempt - stats.tx_total;
-    if (last_tx_retries != tx_extra)
-        last_tx_retries = tx_extra - 1;
 
     status->rx_error = stats.parse_error;
-    status->tx_retries = last_tx_retries;
+    status->tx_retries = tx_extra;
     status->bus_state = CANBUS_STATE_ACTIVE;
 }
 
