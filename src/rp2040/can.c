@@ -23,6 +23,7 @@
 DECL_CONSTANT_STR("RESERVE_PINS_CAN", GPIO_STR_CAN_RX "," GPIO_STR_CAN_TX);
 
 static struct can2040 cbus;
+static uint32_t can_rx_error;
 
 // Transmit a packet
 int
@@ -49,15 +50,19 @@ canhw_get_status(struct canbus_status *status)
     can2040_get_statistics(&cbus, &stats);
     uint32_t tx_extra = stats.tx_attempt - stats.tx_total;
 
-    status->rx_error = stats.parse_error;
+    status->rx_error = can_rx_error + stats.parse_error;
     status->tx_retries = tx_extra;
     status->bus_state = CANBUS_STATE_ACTIVE;
 }
 
-// can2040 callback function - handle rx and tx notifications
+// can2040 callback function - handle rx, tx, and error notifications
 static void
 can2040_cb(struct can2040 *cd, uint32_t notify, struct can2040_msg *msg)
 {
+    if (notify & CAN2040_NOTIFY_ERROR) {
+        can_rx_error++;
+        return;
+    }
     if (notify & CAN2040_NOTIFY_TX) {
         canbus_notify_tx();
         return;
