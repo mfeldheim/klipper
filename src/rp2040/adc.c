@@ -55,8 +55,12 @@ gpio_adc_setup(uint32_t pin)
     return (struct gpio_adc){ .chan = chan };
 }
 
+#define ADC_OVERSAMPLE 32
+
 enum { ADC_DUMMY=0xff };
 static uint8_t last_analog_read = ADC_DUMMY;
+static uint32_t sample_accum;
+static uint8_t sample_remaining;
 
 // Try to sample a value. Returns zero if sample ready, otherwise
 // returns the number of clock ticks the caller should wait before
@@ -68,17 +72,30 @@ gpio_adc_sample(struct gpio_adc g)
     if (!(cs & ADC_CS_READY_BITS))
         // ADC is busy
         goto need_delay;
-    if (last_analog_read == g.chan)
-        // Sample now ready
-        return 0;
-    if (last_analog_read != ADC_DUMMY)
+    if (last_analog_read == g.chan) {
+        if (sample_remaining == 0)
+            // Oversample sequence complete; sample is now ready
+            return 0;
+        // One conversion is ready; accumulate it into the sample
+        sample_accum += adc_hw->result;
+        if (--sample_remaining)
+            // Begin the next conversion of this oversample sequence
+            adc_hw->cs = ((cs & ADC_CS_TS_EN_BITS) | ADC_CS_START_ONCE_BITS
+                          | ADC_CS_EN_BITS | (g.chan << ADC_CS_AINSEL_LSB));
+        else
+            // Oversample sequence complete; sample is now ready
+            return 0;
+    } else if (last_analog_read != ADC_DUMMY) {
         // Sample on another channel in progress
         goto need_delay;
-
-    // Begin sample
-    last_analog_read = g.chan;
-    adc_hw->cs = ((cs & ADC_CS_TS_EN_BITS) | ADC_CS_START_ONCE_BITS
-                  | ADC_CS_EN_BITS | (g.chan << ADC_CS_AINSEL_LSB));
+    } else {
+        // Begin a new oversample sequence
+        last_analog_read = g.chan;
+        sample_accum = 0;
+        sample_remaining = ADC_OVERSAMPLE;
+        adc_hw->cs = ((cs & ADC_CS_TS_EN_BITS) | ADC_CS_START_ONCE_BITS
+                      | ADC_CS_EN_BITS | (g.chan << ADC_CS_AINSEL_LSB));
+    }
 
 need_delay:
     return timer_from_us(5); // Sample takes 2us but provide extra time
@@ -89,13 +106,16 @@ uint16_t
 gpio_adc_read(struct gpio_adc g)
 {
     last_analog_read = ADC_DUMMY;
-    return adc_hw->result;
+    sample_remaining = 0;
+    return sample_accum / ADC_OVERSAMPLE;
 }
 
 // Cancel a sample that may have been started with gpio_adc_sample()
 void
 gpio_adc_cancel_sample(struct gpio_adc g)
 {
-    if (last_analog_read == g.chan)
+    if (last_analog_read == g.chan) {
         last_analog_read = ADC_DUMMY;
+        sample_remaining = 0;
+    }
 }

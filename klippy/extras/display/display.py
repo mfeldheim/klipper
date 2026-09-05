@@ -7,6 +7,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, os, ast
 from . import aip31068_spi, hd44780, hd44780_spi, st7920, uc1701, menu
+from . import rolling_chart
 
 # Normal time between each screen redraw
 REDRAW_TIME = 0.500
@@ -198,6 +199,15 @@ class PrinterLCD:
         self.show_data_group = self.display_data_groups.get(dgroup)
         if self.show_data_group is None:
             raise config.error("Unknown display_data group '%s'" % (dgroup,))
+        # Load optional rolling bar chart sections (bound to this display)
+        self.charts = []
+        self_display = config.get_name()  # 'display' or 'display <subname>'
+        for cc in config.get_prefix_sections('display_chart'):
+            chart_display = cc.get('display', 'display')
+            if self_display != chart_display and \
+                    self_display != 'display ' + chart_display:
+                continue
+            self.charts.append(self._load_chart(cc))
         # Screen updating
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
         self.screen_update_timer = self.reactor.register_timer(
@@ -214,6 +224,8 @@ class PrinterLCD:
                                        self.cmd_SET_DISPLAY_GROUP)
     def get_dimensions(self):
         return self.lcd_chip.get_dimensions()
+    def _load_chart(self, config):
+        return rolling_chart.RollingChart(config)
     def handle_ready(self):
         self.lcd_chip.init()
         # Start screen update timer
@@ -235,6 +247,12 @@ class PrinterLCD:
             self.show_data_group.show(self, self.display_templates, eventtime)
         except:
             logging.exception("Error during display screen update")
+        # Render optional rolling bar charts into the lower half of the screen
+        try:
+            for chart in self.charts:
+                chart.render(self.lcd_chip, eventtime)
+        except:
+            logging.exception("Error during display chart update")
         self.lcd_chip.flush()
         if self.redraw_request_pending:
             return self.redraw_time

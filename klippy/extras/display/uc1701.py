@@ -113,6 +113,41 @@ class DisplayBase:
             page[:] = zeros
     def get_dimensions(self):
         return (16, 4)
+    # Low-level pixel drawing primitives. These operate on the page based
+    # framebuffer (vram[page][col]) and are transmitted by flush().
+    def set_pixel(self, x, y):
+        if x < 0 or x >= self.columns or y < 0 or y >= 64:
+            return
+        self.vram[y // 8][x] |= 1 << (y % 8)
+    def clear_pixel(self, x, y):
+        if x < 0 or x >= self.columns or y < 0 or y >= 64:
+            return
+        self.vram[y // 8][x] &= ~(1 << (y % 8))
+    def hline(self, x0, x1, y):
+        if x1 < x0:
+            x0, x1 = x1, x0
+        for x in range(x0, x1 + 1):
+            self.set_pixel(x, y)
+    def vline(self, x, y0, y1):
+        if y1 < y0:
+            y0, y1 = y1, y0
+        for y in range(y0, y1 + 1):
+            self.set_pixel(x, y)
+    def fill_rect(self, x0, y0, x1, y1):
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        for y in range(y0, y1 + 1):
+            page = self.vram[y // 8]
+            mask = ((1 << (y % 8 + 1)) - 1) ^ ((1 << (y % 8)) - 1)
+            for x in range(x0, x1 + 1):
+                page[x] |= mask
+    def rect(self, x0, y0, x1, y1):
+        self.hline(x0, x1, y0)
+        self.hline(x0, x1, y1)
+        self.vline(x0, y0, y1)
+        self.vline(x1, y0, y1)
 
 # IO wrapper for "4 wire" spi bus (spi bus with an extra data/control line)
 class SPI4wire:

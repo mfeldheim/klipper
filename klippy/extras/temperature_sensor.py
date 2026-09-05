@@ -19,11 +19,20 @@ class PrinterSensorGeneric:
         self.sensor.setup_minmax(self.min_temp, self.max_temp)
         self.sensor.setup_callback(self.temperature_callback)
         pheaters.register_sensor(config, self)
+        self.smooth_time = config.getfloat('smooth_time', 0., minval=0.)
+        self.inv_smooth_time = 1. / self.smooth_time if self.smooth_time else 0.
         self.last_temp = 0.
+        self.last_temp_time = 0.
         self.measured_min = 99999999.
         self.measured_max = 0.
     def temperature_callback(self, read_time, temp):
-        self.last_temp = temp
+        if self.smooth_time:
+            time_diff = read_time - self.last_temp_time
+            self.last_temp_time = read_time
+            adj_time = min(time_diff * self.inv_smooth_time, 1.)
+            self.last_temp += (temp - self.last_temp) * adj_time
+        else:
+            self.last_temp = temp
         if temp:
             self.measured_min = min(self.measured_min, temp)
             self.measured_max = max(self.measured_max, temp)
